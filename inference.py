@@ -13,6 +13,7 @@ ensure_deps()
 
 import asyncio
 import os
+import argparse
 import textwrap
 import json
 import base64
@@ -261,11 +262,22 @@ async def run_task(client: Optional[OpenAI], task: str) -> None:
     log_end(success=success, steps=len(rewards), score=score, rewards=rewards)
 
 async def main() -> None:
+    global MODEL_NAME
+    
+    parser = argparse.ArgumentParser(description="Sentinel-SOC Baseline Inference")
+    parser.add_argument("--task", type=str, choices=["easy", "medium", "hard", "all"], default="all", help="Task difficulty to run")
+    parser.add_argument("--model", type=str, default=MODEL_NAME, help="Model name to use")
+    args = parser.parse_args()
+
     # Use standard API behavior
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN) if HF_TOKEN else None
     
-    # Run Benchmark for easy, medium, hard
-    for task in TASKS:
+    MODEL_NAME = args.model
+
+    tasks_to_run = TASKS if args.task == "all" else [args.task]
+
+    # Run Benchmark
+    for task in tasks_to_run:
         try:
             await run_task(client, task)
         except Exception as e:
