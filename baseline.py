@@ -85,7 +85,7 @@ def baseline_agent(obs: dict, task: str = "easy") -> dict:
         phase = "hard"
 
     # 2. Logic Gates (Grand Master sequence)
-    if "Monitoring for Recurrence" in obs['status']:
+    if "Mitigated" in obs['status']:
         return {"reasoning": "Mission goal achieved.", "tool": "query_logs", "parameters": "heartbeat"}
 
     if "Initial" in obs['status'] or "Active" in obs['status']:
