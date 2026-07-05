@@ -54,7 +54,9 @@ def _extract_ioc_from_logs(logs: str, code_snippet: str, phase: str) -> str:
         # Last resort: any suspicious domain from logs
         match = re.search(r'([\w-]+\.(?:cc|ru|xyz|tk|onion))', logs)
         return match.group(1) if match else "unknown_domain"
-    
+
+    return "unknown_ioc"
+
 # Module-level cache: baseline_agent stores the last query_logs tool result
 # so that _extract_filename_from_logs can use it even without API changes.
 _last_tool_result: str = ""
