@@ -132,15 +132,16 @@ def analytics():
 
 # --- Gradio UI Integration ---
 ui_app = create_gradio_ui(server_url="http://localhost:7860")
+# BUG 3 FIX: theme/css/js are direct keyword args of mount_gradio_app,
+# NOT nested inside app_kwargs (which is reserved for FastAPI constructor args).
+# Previously they were silently ignored, so the dark SOC theme never applied.
 app = gr.mount_gradio_app(
-    app, 
-    ui_app, 
+    app,
+    ui_app,
     path="/",
-    app_kwargs={
-        "theme": THEME,
-        "css": CSS,
-        "js": JS_FORCE_DARK
-    }
+    theme=THEME,
+    css=CSS,
+    js=JS_FORCE_DARK,
 )
 
 def main():

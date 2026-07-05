@@ -237,18 +237,23 @@ async def run_task(client: Optional[OpenAI], task: str) -> None:
                     reward = data['reward']
                     done = data['done']
                     last_tool_result = data['info'].get("tool_result", "")
-                    
-                    # Also update local_env mirror for score consistency
-                    local_env.step(action) 
+
+                    # Also update local_env mirror for score consistency.
+                    # BUG 4 FIX: save the mirror result so we can reuse it if remote
+                    # fails on a subsequent step (avoids double-stepping local_env).
+                    local_step_result = local_env.step(action)
                 except Exception:
-                    # Emergency switch to local if server dies during run
+                    # Emergency switch to local if server dies during run.
+                    # Reuse the already-saved mirror result — do NOT call step() again.
                     remote_env = False
-                    obs_obj, reward, done, info = local_env.step(action)
+                    local_step_result = local_env.step(action)
+                    obs_obj, reward, done, info = local_step_result
                     obs = obs_obj.model_dump()
                     last_tool_result = info.get("tool_result", "")
             else:
                 # Direct use of local_env
-                obs_obj, reward, done, info = local_env.step(action)
+                local_step_result = local_env.step(action)
+                obs_obj, reward, done, info = local_step_result
                 obs = obs_obj.model_dump()
                 last_tool_result = info.get("tool_result", "")
 

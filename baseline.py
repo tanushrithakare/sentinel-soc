@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 from client import SentinelSOCClient
-from models import IncidentAction
+from models import IncidentAction, IncidentObs
 
 def _extract_ioc_from_logs(logs: str, code_snippet: str, phase: str) -> str:
     """
@@ -19,12 +19,21 @@ def _extract_ioc_from_logs(logs: str, code_snippet: str, phase: str) -> str:
         return match.group(0) if match else "sk_live_unknown"
     
     elif phase == "medium":
-        # Look for suspicious external IPs (not 10.x or 192.168.x)
-        matches = re.findall(r'(?:^|\s)((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?:\s|$|:)', logs)
-        for ip in matches:
+        # BUG 5 FIX: medium logs contain multiple external IPs (target + decoy).
+        # The target IP is specifically the one on the same line as the SQL payload.
+        # Per-line correlation ensures we pick the attacker IP, not the decoy.
+        for line in logs.splitlines():
+            if re.search(r'(?:UNION|SELECT|DROP|INSERT|injection)', line, re.IGNORECASE):
+                ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                if ip_match:
+                    return ip_match.group(1)
+        # Fallback: first non-RFC-1918 external IP
+        all_ips = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', logs)
+        for ip in all_ips:
             octets = ip.split('.')
-            # Skip internal ranges
-            if not (octets[0] == '10' or (octets[0] == '192' and octets[1] == '168') or octets[0] == '172'):
+            if not (octets[0] == '10' or
+                    (octets[0] == '192' and octets[1] == '168') or
+                    octets[0] == '172'):
                 return ip
         return "unknown_ip"
     
@@ -88,28 +97,31 @@ def baseline_agent(obs: dict, task: str = "easy") -> dict:
     if "Mitigated" in obs['status']:
         return {"reasoning": "Mission goal achieved.", "tool": "query_logs", "parameters": "heartbeat"}
 
-    if "Initial" in obs['status'] or "Active" in obs['status']:
-        if "High-confidence" not in obs['status'] and "CONFIRMED" not in obs['status']:
-            # Gate 1: Logs first
+    if "Active" in obs['status']:
+        thread = obs['incident_thread']
+
+        # Gate 1: No logs reviewed yet — start reconnaissance
+        if "Reconnaissance" in thread and "Suspicious" not in thread:
             if phase == "easy":
                 return {"reasoning": "Step 1: Discovering patterns in logs.", "tool": "query_logs", "parameters": "all"}
             elif phase == "medium":
                 return {"reasoning": "Step 1: Monitoring DB traffic.", "tool": "query_logs", "parameters": "database"}
             else:
                 return {"reasoning": "Step 1: Auditing network egress.", "tool": "query_logs", "parameters": "network"}
-        
-        if "Ready for Fix" not in obs['status'] and "Root Cause" not in obs['status']:
-            # Gate 2: Extract IOC after logs (dynamically from logs)
-            ioc = _extract_ioc_from_logs(obs['logs'], obs['code_snippet'], phase)
-            if phase == "easy":
-                return {"reasoning": f"Step 2: Confirming PRODUCTION leak {ioc}.", "tool": "extract_ioc", "parameters": ioc}
-            elif phase == "medium":
-                return {"reasoning": f"Step 2: Confirming Malicious IP source {ioc}.", "tool": "extract_ioc", "parameters": ioc}
-            else:
-                return {"reasoning": f"Step 2: Confirming Backdoor Domain {ioc}.", "tool": "extract_ioc", "parameters": ioc}
 
-        if "Monitoring" not in obs['status']:
-            # Gate 3: Inspect file (dynamically extracted)
+        # Gate 2: Logs reviewed but IOC not yet extracted — extract IOC
+        if "Identification" in thread or ("Containment" in thread and "Source file not yet isolated" in thread):
+            if "IOC confirmed" not in thread:
+                ioc = _extract_ioc_from_logs(obs['logs'], obs['code_snippet'], phase)
+                if phase == "easy":
+                    return {"reasoning": f"Step 2: Confirming PRODUCTION leak {ioc}.", "tool": "extract_ioc", "parameters": ioc}
+                elif phase == "medium":
+                    return {"reasoning": f"Step 2: Confirming Malicious IP source {ioc}.", "tool": "extract_ioc", "parameters": ioc}
+                else:
+                    return {"reasoning": f"Step 2: Confirming Backdoor Domain {ioc}.", "tool": "extract_ioc", "parameters": ioc}
+
+        # Gate 3: IOC confirmed but file not yet inspected
+        if "Containment" in thread and "Source file not yet isolated" in thread:
             filename = _extract_filename_from_logs(obs['logs'], obs['code_snippet'], phase)
             if phase == "easy":
                 return {"reasoning": f"Step 3: Finding root cause in {filename}.", "tool": "inspect_file", "parameters": filename}
@@ -118,8 +130,19 @@ def baseline_agent(obs: dict, task: str = "easy") -> dict:
             else:
                 return {"reasoning": f"Step 3: Auditing compromised library {filename}.", "tool": "inspect_file", "parameters": filename}
 
-        # Gate 4: Final Fix
-        return {"reasoning": "Final Mitigation.", "tool": "apply_fix", "parameters": "rotate_and_mask" if phase == "easy" else "patch_sql" if phase == "medium" else "remove_backdoor"}
+        # Gate 3 alt: file not inspected (Suspicious source file located)
+        if "Suspicious source file located" in thread:
+            filename = _extract_filename_from_logs(obs['logs'], obs['code_snippet'], phase)
+            if phase == "easy":
+                return {"reasoning": f"Step 3: Finding root cause in {filename}.", "tool": "inspect_file", "parameters": filename}
+            elif phase == "medium":
+                return {"reasoning": f"Step 3: Finding vulnerable DB logic in {filename}.", "tool": "inspect_file", "parameters": filename}
+            else:
+                return {"reasoning": f"Step 3: Auditing compromised library {filename}.", "tool": "inspect_file", "parameters": filename}
+
+        # Gate 4: Both IOC and file confirmed — apply fix
+        if "Remediation" in thread or ("IOC verified" in thread and "Root cause" in thread):
+            return {"reasoning": "Final Mitigation.", "tool": "apply_fix", "parameters": "rotate_and_mask" if phase == "easy" else "patch_sql" if phase == "medium" else "remove_backdoor"}
 
     return {"reasoning": "Default hunt.", "tool": "query_logs", "parameters": "status"}
 
@@ -135,7 +158,9 @@ async def run_baseline(task="easy"):
             action_dict = baseline_agent(obs.model_dump(), task=task)
             action = IncidentAction(**action_dict)
             res = client.step(action)
-            obs = res['observation']
+            # BUG 1 FIX: client.step() returns a raw dict; wrap observation back
+            # into IncidentObs so obs.model_dump() works on the next iteration.
+            obs = IncidentObs(**res['observation'])
             print(f"Step {i+1}: {res['info']['tool_result']} (Reward: {res['reward']:.2f})")
             if res['done']: break
             
