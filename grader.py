@@ -25,21 +25,29 @@ def grade(agent_fn, task: str = "easy") -> float:
     }.get(task, 10)
     
     # 2. Execution Loop
+    last_tool_result = ""
     for _ in range(MAX_STEPS):
-        # The agent_fn must return an IncidentAction or a compatible dict
-        action_dict = agent_fn(obs.model_dump())
-        
+        # The agent_fn must return an IncidentAction or a compatible dict.
+        # Pass last_tool_result if the agent accepts it (backward-compatible check).
+        import inspect
+        sig = inspect.signature(agent_fn)
+        if "last_tool_result" in sig.parameters:
+            action_dict = agent_fn(obs.model_dump(), last_tool_result=last_tool_result)
+        else:
+            action_dict = agent_fn(obs.model_dump())
+
         # Convert dict to IncidentAction if necessary
         if isinstance(action_dict, dict):
             action = IncidentAction(**action_dict)
         else:
             action = action_dict
-            
+
         obs, reward, done, info = env.step(action)
-        
+        last_tool_result = info.get("tool_result", "")
+
         if done:
             break
-            
+
     # 3. Final Deterministic Grade
     return env.grade()
 
